@@ -1,0 +1,9 @@
+pandas
+numpy
+yfinance
+networkx
+riskfolio-lib
+alpaca-py
+python-dotenv
+scipy
+statsmodels
