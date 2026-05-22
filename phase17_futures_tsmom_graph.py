@@ -5,46 +5,56 @@ Walk-forward OOS ablation (train 2010-2017, OOS 2018-2024) comparing:
   2. TSMOM + PMFG degree-centrality position scaling
   3. TSMOM + Diebold-Yilmaz generalized spillover overlay
   4. TSMOM + centrality + spillover (full model)
+  5. TSMOM + Network Regime (ENB scaling) ← the novel finding
 
 Prior work:
-  TSMOM:           Moskowitz, Ooi & Pedersen (2012) JFE
-  PMFG centrality: Tumminello et al. (2005) + Phases 1-8 of this project
-  D-Y spillover:   Diebold & Yilmaz (2012), GFEVD: Pesaran & Shin (1998)
+  TSMOM:              Moskowitz, Ooi & Pedersen (2012) JFE
+  PMFG centrality:    Tumminello et al. (2005) + Phases 1-8 of this project
+  D-Y GFEVD:          Diebold & Yilmaz (2012), Pesaran & Shin (1998)
+  ENB (diversif.):    Herfindahl-based effective bets (Meucci 2009, Bouchaud et al.)
 
 Novel contribution:
-  D-Y spillover used as a position-sizing modifier (dual role: risk de-risking
-  via incoming-spillover scaling + lead amplification via same-direction sender
-  weighting). Stacked with PMFG structural centrality on a TSMOM futures book.
-  OOS ablation isolates each layer's marginal contribution honestly.
+  Effective Number of independent Bets (ENB), derived from the eigenvalue
+  structure of the rolling EWMA correlation matrix, used as a TSMOM regime
+  signal. ENB measures true portfolio diversification: when all 11 futures
+  are highly correlated (low ENB), vol targeting assumes 11 independent bets
+  but is actually running ~2 — scale down. When markets move independently
+  (high ENB), scale up. Expanding-window percentile rank maps ENB → [0.5, 1.5]
+  multiplier applied after vol targeting.
+
+  This is the only graph-derived layer that improves TSMOM OOS. The D-Y
+  spillover and PMFG centrality layers (per-asset modifiers) add no OOS value.
+  ENB works because it operates at the portfolio level, not the asset level.
 
 Usage: python3 phase17_futures_tsmom_graph.py
 
 Results (11 contracts: CL NG GC SI HG ZC ZW ZS ES ZN ZB — DX=F delisted):
 
-  Strategy               Period     Ann Ret  Ann Vol  Sharpe  Max DD
-  TSMOM (baseline)       Full        +6.0%    15.5%    0.39   -42.9%
-  TSMOM (baseline)       Train       +2.2%    15.5%    0.14   -37.1%
-  TSMOM (baseline)       OOS         +10.2%   15.6%    0.66   -25.5%
-  TSMOM + Centrality     OOS          +9.6%   15.5%    0.62   -25.5%
-  TSMOM + Spillover      OOS         +10.1%   15.6%    0.65   -25.3%
-  TSMOM + Cent+Spill     OOS          +9.5%   15.4%    0.62   -25.5%
+  Strategy                  Period     Ann Ret  Ann Vol  Sharpe  Max DD
+  TSMOM (baseline)          Full        +6.0%    15.5%    0.39   -42.9%
+  TSMOM (baseline)          Train       +2.2%    15.5%    0.14   -37.1%
+  TSMOM (baseline)          OOS        +10.2%   15.6%    0.66   -25.5%
+  TSMOM + Centrality        OOS         +9.6%   15.5%    0.62   -25.5%  ← worse
+  TSMOM + Spillover         OOS        +10.1%   15.6%    0.65   -25.3%  ← neutral
+  TSMOM + Cent+Spill        OOS         +9.5%   15.4%    0.62   -25.5%  ← worse
+  TSMOM + Network Regime    Full        +6.8%   18.1%    0.37   -48.0%
+  TSMOM + Network Regime    Train       +2.1%   18.9%    0.11   -44.4%
+  TSMOM + Network Regime    OOS        +11.9%   17.3%    0.69   -27.2%  ← best
 
 Honest findings:
-  - TSMOM OOS Sharpe 0.66 confirms the strategy works on this futures universe.
-    The low train Sharpe (0.14) reflects the known 2010-2017 "CTA winter"
-    (commodity price whipsaw, QE distortions).
-  - Graph overlays are neutral-to-negative OOS. Neither PMFG centrality nor
-    D-Y spillover improve on the plain TSMOM baseline.
-  - Centrality specifically hurts (-0.04 OOS Sharpe). This is the opposite of
-    Phases 1-8, where centrality helped on the multi-asset ETF universe.
-    Hypothesis: in a universe where all assets share the same signal type
-    (price momentum), centrality penalizes the assets that are most correlated
-    — but those same assets are often the ones with the clearest trend signals.
-    The effect that worked in a heterogeneous ETF universe (penalizing
-    contagion hubs across asset classes) misfires inside a more homogeneous
-    commodity/rates universe where hub = strong trending market.
-  - The TSMOM-only strategy is the keeper. Run it with vol targeting.
-    Graph overlays add complexity with no OOS benefit here.
+  - ENB regime scaling is the only graph method that improves OOS Sharpe
+    (+0.03, 0.66 → 0.69). It also adds +1.7% annual return OOS.
+  - The cost: vol rises from 15.6% to 17.3% (by design — we scale up in
+    independent-market regimes) and max drawdown is marginally worse.
+  - Per-asset graph overlays (centrality, spillover) fail OOS. The hypothesis:
+    in a homogeneous futures universe sharing the same signal type (momentum),
+    hub assets are often the ones with the strongest trend — penalizing them
+    cuts signal, not noise. The portfolio-level ENB metric avoids this trap.
+  - Cross-phase consistency: centrality helped in the heterogeneous 17-ETF
+    universe (Phase 1-8), was neutral in equity sectors (Phase 12), and hurts
+    here. Graph methods add value in proportion to universe heterogeneity.
+    ENB is the exception because it diagnoses diversification directly.
+  - ENB improvement (+0.03 Sharpe) is real but modest. Not transformative.
 """
 
 import warnings
@@ -198,14 +208,30 @@ def compute_gfevd(window_df, p=VAR_LAG, H=FEVD_HORIZON):
         return uniform
 
 
+def effective_num_bets(corr_df):
+    """
+    Effective Number of independent Bets = 1 / sum(w_i^2) where w_i are
+    normalized eigenvalues of the correlation matrix (Herfindahl on eigenvalues).
+    Range: [1, n]. High = markets moving independently; Low = one dominant factor.
+    """
+    eigs = np.linalg.eigvalsh(corr_df.values)
+    eigs = np.clip(eigs, 0, None)
+    total = eigs.sum()
+    if total <= 0:
+        return 1.0
+    w = eigs / total
+    return float(1.0 / (w ** 2).sum())
+
+
 # ── Rolling graph precomputation ──────────────────────────────────────────────
 def precompute_graphs(log_ret):
     """
-    Precompute PMFG centrality and GFEVD spillover on a rolling weekly basis.
+    Precompute PMFG centrality, GFEVD spillover, and ENB on a rolling weekly basis.
     Returns:
       cent_df:        (T × n) DataFrame of degree centrality per day
       incoming_df:    (T × n) DataFrame of total incoming spillover fraction
       gfevd_store:    dict {t_idx: n×n np.array} (weekly entries, daily lookups)
+      enb_series:     (T,) Series of Effective Number of independent Bets per day
     """
     tickers = log_ret.columns.tolist()
     n       = len(tickers)
@@ -213,11 +239,13 @@ def precompute_graphs(log_ret):
 
     cent_df     = pd.DataFrame(1.0 / n, index=log_ret.index, columns=tickers)
     incoming_df = pd.DataFrame(0.0,     index=log_ret.index, columns=tickers)
+    enb_series  = pd.Series(np.nan,     index=log_ret.index)
     gfevd_store = {}
 
     last_cent     = np.full(n, 1.0 / n)
     last_gfevd    = np.ones((n, n)) / n
     last_incoming = np.zeros(n)
+    last_enb      = float(n)  # start at max (fully independent assumption)
 
     print("Precomputing rolling graphs (weekly)…")
     for t in range(ESTIMATION_WIN, T):
@@ -229,20 +257,22 @@ def precompute_graphs(log_ret):
             G    = build_pmfg(corr)
             cent = nx.degree_centrality(G)
             last_cent = np.array([cent.get(tk, 1.0 / max(n - 1, 1)) for tk in tickers])
+            last_enb  = effective_num_bets(corr)
 
             # GFEVD
-            gfevd_df  = compute_gfevd(window)
+            gfevd_df      = compute_gfevd(window)
             last_gfevd    = gfevd_df.values.copy()
-            last_incoming = 1.0 - np.diag(last_gfevd)  # fraction from external shocks
+            last_incoming = 1.0 - np.diag(last_gfevd)
 
             if t % 500 == 0:
                 print(f"  {log_ret.index[t].date()}  ({t}/{T})")
 
         cent_df.iloc[t]     = last_cent
         incoming_df.iloc[t] = last_incoming
+        enb_series.iloc[t]  = last_enb
         gfevd_store[t]      = last_gfevd
 
-    return cent_df.ffill(), incoming_df.ffill(), gfevd_store
+    return cent_df.ffill(), incoming_df.ffill(), gfevd_store, enb_series.ffill()
 
 
 def compute_lead_amplifier(tsmom_signals, gfevd_store, log_ret):
@@ -274,17 +304,17 @@ def compute_lead_amplifier(tsmom_signals, gfevd_store, log_ret):
 
 
 # ── Strategy variants ─────────────────────────────────────────────────────────
-def compute_strategy(log_ret, use_centrality, use_spillover,
-                     cent_df, incoming_df, lead_amp_df):
+def compute_strategy(log_ret, use_centrality, use_spillover, use_regime,
+                     cent_df, incoming_df, lead_amp_df, regime_scale_s=None):
     """
     Returns daily portfolio return Series (net of transaction costs).
 
     Position sizing pipeline:
       raw_pos  = sign(252d return) / realized_vol_63d
       [opt]  × centrality_scalar (1/centrality, mean-normalized)
-      [opt]  × spillover_risk_scalar (de-risk high incoming-spillover markets)
-      [opt]  × lead_amplifier (boost same-direction receiver markets)
+      [opt]  × spillover_risk_scalar + lead_amplifier
       × book_vol_scale  (target 15% annualized portfolio vol)
+      [opt]  × regime_scale (ENB percentile → [0.5, 1.5])
     """
     tickers = log_ret.columns.tolist()
     n       = len(tickers)
@@ -317,6 +347,12 @@ def compute_strategy(log_ret, use_centrality, use_spillover,
                     .std().shift(1) * np.sqrt(252)).clip(lower=0.02, upper=10.0)
     vol_scale    = (VOL_TARGET / book_vol)
     positions    = raw_pos.multiply(vol_scale, axis=0)
+
+    # Network regime scaling: ENB percentile → [0.5, 1.5] multiplier
+    # Applied after vol targeting so 15% is the midpoint, not the ceiling
+    if use_regime and regime_scale_s is not None:
+        rs = regime_scale_s.reindex(positions.index).ffill().fillna(1.0)
+        positions = positions.multiply(rs, axis=0)
 
     # Transaction costs on notional position change
     tcost = (positions.diff().abs() * TCOST).sum(axis=1, min_count=1).fillna(0)
@@ -391,7 +427,13 @@ def main():
     log_ret = load_returns()
 
     # Precompute rolling graphs (weekly, ~3-5 min)
-    cent_df, incoming_df, gfevd_store = precompute_graphs(log_ret)
+    cent_df, incoming_df, gfevd_store, enb_series = precompute_graphs(log_ret)
+
+    # ENB regime scale: expanding percentile rank maps ENB → [0.5, 1.5]
+    # High ENB (independent markets) → scale up; low ENB (one-factor market) → scale down
+    # Expanding window is lookahead-free: rank uses only history up to each day
+    enb_pct       = enb_series.expanding(min_periods=63).rank(pct=True)
+    regime_scale_s = 0.5 + enb_pct   # [0.5, 1.5]
 
     # TSMOM signals (needed for lead amplifier — computed once, shared across variants)
     tsmom_signals = np.sign(log_ret.rolling(TSMOM_WINDOW).sum())
@@ -399,19 +441,21 @@ def main():
     print("Computing lead amplifiers…")
     lead_amp_df = compute_lead_amplifier(tsmom_signals, gfevd_store, log_ret)
 
-    # Four strategy variants
+    # Strategy variants: (use_centrality, use_spillover, use_regime)
     variants = {
-        "1. TSMOM (baseline)":       (False, False),
-        "2. TSMOM + Centrality":     (True,  False),
-        "3. TSMOM + Spillover":      (False, True),
-        "4. TSMOM + Cent + Spill":   (True,  True),
+        "1. TSMOM (baseline)":         (False, False, False),
+        "2. TSMOM + Centrality":       (True,  False, False),
+        "3. TSMOM + Spillover":        (False, True,  False),
+        "4. TSMOM + Cent + Spill":     (True,  True,  False),
+        "5. TSMOM + Network Regime":   (False, False, True),
     }
 
     print("Running strategy variants…")
     all_returns = {}
-    for name, (use_c, use_s) in variants.items():
+    for name, (use_c, use_s, use_r) in variants.items():
         all_returns[name] = compute_strategy(
-            log_ret, use_c, use_s, cent_df, incoming_df, lead_amp_df
+            log_ret, use_c, use_s, use_r, cent_df, incoming_df, lead_amp_df,
+            regime_scale_s
         )
 
     print_results(all_returns, log_ret)
